@@ -3,6 +3,7 @@ import socket
 import random
 import re
 
+
 def port_to_connect(layer):
     if 0 == layer:
         return random.randint(8001, 8003)
@@ -51,6 +52,7 @@ def process_input(filename):
 
     return transactions
 
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Crear replicació epidèmica")
@@ -64,11 +66,16 @@ if __name__ == "__main__":
     print("FINALITZANT TRANSACCIONS...")
 
 """""
-    str = "adb v345hj43hv b42"
+    str = "b w(65,89) c"
     array = re.findall(r'[0-9]+', str)
     for i in range(0, len(array)):
         array[i] = int(array[i])
     data = re.search(r'[0-9]+', str).group()
     print(array)
     print(data)
-"""""
+ """""
+
+#TODO: fer un programa que llenci primer tots els nodes i despres el client. Quan el client acabi,
+# que pregunti si vol que recarrguem de nou les transaccion o tancar el sistema, llavor que el mateix
+# programa (que inicia tots) llenci CTRL + C a cada node, i aquest gestioni el mateix tancament. No cal
+# llençar signal a client
