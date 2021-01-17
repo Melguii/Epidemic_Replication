@@ -1,3 +1,4 @@
+import os
 import socket
 from threading import Thread, Lock
 import argparse
@@ -5,35 +6,123 @@ import time
 import json
 import signal
 
+import Operation as Op
+
 values = {}
 update_timer = 10
 mutex = Lock()
 
-core_layer_node = None
+layer2_node1 = None
+layer2_node2 = None
+
+dedicated_server = None
+server_cl = None
+client_cl = None
+close = False
 
 
-def client_node(host, cl_port):
-    global core_layer_node
+def update_layer2(signum, stack):
+    global values, layer2_node1, layer2_node2, mutex
+    mutex.acquire()
+    layer2_node1.send(json.dumps(values).encode())
+    layer2_node2.send(json.dumps(values).encode())
+    mutex.release()
+    signal.alarm(update_timer)
 
-    # Ens connectem als CoreLayer veïns
-    core_layer_node = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    core_layer_node.connect((host, cl_port))
 
-    #TODO: Aqui configurem l'alarma per actualitzar L2
+def client_node(host, l2_ports):
+    global layer2_node1, layer2_node2
+    if l2_ports != 0:
+        layer2_node1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        layer2_node1.connect((host, l2_ports[0]))
+        layer2_node2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        layer2_node2.connect((host, l2_ports[1]))
+
+    print("CONNEXIONS A SERVIDORS ESTABLERTES")
+
+
+def dedicated_server_core_layer(dscl_socket):
+    global values, mutex, close, name
+    while True:
+        new_values = dscl_socket.recv(1024).decode()
+        if new_values == "":
+            close = True
+            return
+
+        mutex.acquire()
+        values = {int(k): int(v) for k, v in json.loads(new_values).items()}
+        mutex.release()
+        Op.add_log("Logs/" + name + ".txt", values)
+
+
+def dedicated_server_client(dsc_socket):
+    transaction = dsc_socket.recv(1024).decode()
+    operations = Op.parse_transaction(transaction)
+
+    for op in operations:
+        string = "INDEX -> [" + str(op.index) \
+                 + "]; VALUE -> [" + str(values.get(int(op.index), "POSICIÓ BUIDA")) + "]"
+        dsc_socket.send(string.encode())
+        time.sleep(0.3)
+
+    dsc_socket.send("ACK".encode())
+    dsc_socket.close()
+
+
+def server(host, port):
+    global dedicated_server
+    dedicated_server = []
+    connection_counter = 0
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, port))
+        s.listen()
+        print("ES PERMETEN NOVES CONNEXIONS...")
+        while True:
+            (clientsocket, address) = s.accept()
+            if connection_counter < 1:
+                dedicated_server.append(Thread(target=dedicated_server_core_layer, args=(clientsocket,)))
+            else:
+                dedicated_server.append(Thread(target=dedicated_server_client, args=(clientsocket,)))
+            dedicated_server[connection_counter].start()
+            connection_counter += 1
+
+
+def close_node(signum, stack):
+    global dedicated_server, server_cl, client_cl
+    global layer2_node1, layer2_node2
+    # Tanquem sockets
+    if layer2_node1 is not None and layer2_node2 is not None:
+        layer2_node1.close()
+        layer2_node2.close()
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 if __name__ == "__main__":
+    global name
+    signal.signal(signal.SIGINT, close_node)
+
     # Parsejem arguments i fitxer de transaccions. (o be llegirles totes
     parser = argparse.ArgumentParser(description="Crear replicació epidèmica")
-    parser.add_argument("id", type=float, help="Instància del servidor")
+    parser.add_argument("id", type=int, help="Instància del servidor")
     args = parser.parse_args()
 
     HOST = '127.0.0.1'
     PORT = 9000 + args.id
-    cl_port = 8002 if PORT == 9001 else 8003
+    l2_ports = 0 if PORT == 9001 else [10001, 10002]
+    name = "B1" if l2_ports == 0 else "B2"
 
-    with Thread(target=server(HOST, PORT), args=(2,)) as server_cl:
-        server_cl.start()
-    time.sleep(20)  # Temps per obrir els altres core layers servers
-    with Thread(target=client_node(HOST, cl_port), args=(2,)).start() as client_cl:
-        client_cl.start()
+    server_cl = Thread(target=server, args=(HOST, PORT,))
+    server_cl.start()
+
+    time.sleep(2)  # Temps per obrir els altres core layers servers
+
+    client_cl = Thread(target=client_node, args=(HOST, l2_ports,))
+    client_cl.start()
+
+    # Aquí configurem l'alarma per actualitzar L2
+    if l2_ports != 0:
+        signal.signal(signal.SIGALRM, update_layer2)
+        signal.alarm(update_timer)
+    signal.signal(signal.SIGINT, close_node)
+    while True:
+        signal.pause()

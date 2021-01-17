@@ -4,6 +4,9 @@ import argparse
 import time
 import re
 import json
+import signal
+import os
+import Operation as Op
 
 values = {}
 update_counter = 0
@@ -11,63 +14,46 @@ update_counter = 0
 last_op = None
 mutex = Lock()
 
-layer1_node = None
+dedicated_server = None
+
 server_a = None
 server_b = None
-
-
-# TODO: Encara falta testejar codi i tb canviar algunes cosetes
-# TODO: Falta que mitjançant alguna operació es tanquin els recursos
-
-class Operation:
-    def __init__(self, index, value, type):
-        self.index = index
-        self.value = value
-        self.type = type
-
-    def to_string(self):
-        return "w(" + self.index + "," + self.value + ")"
-
-
-def parse_transaction(transaction):
-    operations = []
-    array_operations = transaction.split(' ')
-
-    for op in array_operations:
-        if "r" in op:
-            operations.append(Operation(re.search(r'[0-9]+', transaction).group(), -1, 'r'))
-        elif "w" in op:
-            write_operations = re.findall(r'[0-9]+', op)
-            operations.append(Operation(int(write_operations[0]), int(write_operations[1]), 'w'))
-
-    return operations
+layer1_node = None
+close = False
 
 
 def dedicated_server_client(dsc_socket):
-    global update_counter
-    global last_op
+    global update_counter, last_op, values, mutex
     transaction = dsc_socket.recv(1024).decode()
-    operations = parse_transaction(transaction)
+    operations = Op.parse_transaction(transaction)
+    print("NOVA TRANSACCIó DETECTADA!")
 
     for op in operations:
+        print("Un altre client: " + op.to_string())
         if op.type is 'r':
-            string = "INDEX -> [" + op.index + "]; VALUE -> [" + values[op.index] + "]"
+            string = "INDEX -> [" + str(op.index) \
+                     + "]; VALUE -> [" + str(values.get(int(op.index), "POSICIÓ BUIDA")) + "]"
             dsc_socket.send(string.encode())
+            time.sleep(0.3)
         else:
             values[op.index] = op.value
-            update_counter += 1
             last_op = op.to_string()
             # Enviem l'operació als nodes veïns
             mutex.release()
+            time.sleep(0.3)
             # Esperem que finalitzi la comuncació entre veïns
             mutex.acquire()
 
-    dsc_socket.send("ACK")
+    dsc_socket.send("ACK".encode())
     dsc_socket.close()
 
 
 def update_layer1_node():
-    global update_counter
+    global update_counter, layer1_node, values, last_op
+
+    # Cada vegada que cridem la funció, vol dir que s'ha executat una nova escriptura
+    update_counter += 1
+    Op.add_log("Logs/" + name + ".txt", values)
 
     if layer1_node is not None and 10 == update_counter:
         update_counter = 0
@@ -78,45 +64,55 @@ def update_layer1_node():
 
 
 def dedicated_server_neighbour(dsn_socket):
-    global update_counter
-    while True:
-        transaction = dsn_socket.recv(1024).decode()
-        op = re.findall(r'[0-9]+', transaction)
+    global update_counter, values, update_counter, close
+    print("NOVA CONNEXIÓ DE SERVIDOR ENTRANT!")
 
-        values[op[0]] = op[1]
-        update_counter += 1
+    while True:
+        # Quan es tanca, el recv sempre rep trama buida (no hem salta SIGPIPE)
+        operation = dsn_socket.recv(1024).decode()
+        if operation == "":
+            close = True
+            return
+
+        print("Un altre servidor: " + operation)
+
+        # Actualitzem valors d'aquest node
+        op = re.findall(r'[0-9]+', operation)
+        values[int(op[0])] = int(op[1])
 
         # Mirem si hem d'actualitzar Layer1
         update_layer1_node()
-        dsn_socket.send("ACK")
+        dsn_socket.send("ACK".encode())
 
 
 def server(host, port):
+    global dedicated_server, close
+    dedicated_server = []
     connection_counter = 0
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((host, port))
-        s.listen()
-        conn, addr = s.accept()
-        with conn:
-            while True:
-                (clientsocket, address) = s.accept()
-                if connection_counter < 2:
-                    with Thread(target=dedicated_server_neighbour(clientsocket), args=(1,)) as dedicated_server_thread:
-                        dedicated_server_thread.start()
-                else:
-                    with Thread(target=dedicated_server_client(clientsocket), args=(1,)) as dedicated_server_thread:
-                        dedicated_server_thread.start()
+        s.listen(5)
+        print("ES PERMETEN NOVES CONNEXIONS...")
+        while True:
+            if close is True:
+                break
+            (clientsocket, address) = s.accept()
+            if connection_counter < 2:
+                dedicated_server.append(Thread(target=dedicated_server_neighbour, args=(clientsocket,)))
+            else:
+                dedicated_server.append(Thread(target=dedicated_server_client, args=(clientsocket,)))
+            dedicated_server[connection_counter].start()
+            connection_counter += 1
 
 
 # Encarregat d'anar fer transaccions sobre el node i enviar als altres CL la instrucció
 def client_node(host, servers_to_connect, l1_port):
-    global server_a, server_b, layer1_node
-    global update_counter
+    global server_a, server_b, layer1_node, mutex, last_op
 
     # Ens connectem als CoreLayer veïns
     server_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_a.connect((host, servers_to_connect[0]))
-
     server_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_b.connect((host, servers_to_connect[1]))
 
@@ -124,6 +120,8 @@ def client_node(host, servers_to_connect, l1_port):
     if l1_port > 0:
         layer1_node = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         layer1_node.connect((host, l1_port))
+
+    print("CONNEXIONS A SERVIDORS ESTABLERTES")
 
     mutex.acquire()
     while True:
@@ -134,37 +132,60 @@ def client_node(host, servers_to_connect, l1_port):
         server_b.send(last_op.encode())
 
         # Esperem resposta "ACK" del altres servidor abans de continuar
-        if server_a.recv(1024).decode() == "ACK":
+        while server_a.recv(1024).decode() != "ACK":
             pass
-        if server_b.recv(1024).decode() == "ACK":
+        while server_b.recv(1024).decode() != "ACK":
             pass
 
         # Mirem si hem d'actualitzar Layer1
         update_layer1_node()
         mutex.release()
+        time.sleep(0.3)
 
 
 def identify_server_port(self_server_port):
+    global name
     if self_server_port == 8001:
+        name = "A1"
         return [8002, 8003], 0
     elif self_server_port == 8002:
+        name = "A2"
         return [8001, 8003], 9001
     else:
+        name = "A3"
         return [8001, 8002], 9002
 
 
+def close_node(signum, stack):
+    global layer1_node, server_a, server_b
+    print("FINALITZANT EXECUCIÓ...")
+    # Tanquem sockets
+    if layer1_node is not None:
+        layer1_node.close()
+    server_a.close()
+    server_b.close()
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 if __name__ == "__main__":
+    global server_cl, client_cl
     # Parsejem arguments i fitxer de transaccions. (o be llegirles totes
     parser = argparse.ArgumentParser(description="Crear replicació epidèmica")
-    parser.add_argument("id", type=float, help="Instància del servidor")
+    parser.add_argument("id", type=int, help="Instància del servidor")
     args = parser.parse_args()
 
     HOST = '127.0.0.1'
     PORT = 8000 + args.id
     cl_ports, l1_port = identify_server_port(PORT)
 
-    with Thread(target=server(HOST, PORT), args=(2,)) as server_cl:
-        server_cl.start()
-    time.sleep(15)  # Temps per obrir els altres core layers servers
-    with Thread(target=client_node(HOST, cl_ports, l1_port), args=(3,)).start() as client_cl:
-        client_cl.start()
+    server_cl = Thread(target=server, args=(HOST, PORT,))
+    server_cl.start()
+
+    time.sleep(2)  # Temps per obrir els altres core layers servers
+
+    client_cl = Thread(target=client_node, args=(HOST, cl_ports, l1_port,))
+    client_cl.start()
+
+    signal.signal(signal.SIGINT, close_node)
+    while True:
+        signal.pause()
