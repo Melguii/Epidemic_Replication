@@ -1,3 +1,4 @@
+import asyncio
 import os
 import socket
 import time
@@ -5,6 +6,8 @@ from threading import Thread
 import argparse
 import json
 import signal
+
+import websockets
 
 import Operation as Op
 
@@ -22,8 +25,6 @@ def dedicated_server_layer1(dsl1_socket):
             return
         values = {int(k): int(v) for k, v in json.loads(new_values).items()}
         Op.add_log("Logs/" + name + ".txt", values)
-        print("Layer 2 actualitzat!")
-        print(values)
 
 
 def dedicated_server_client(dsc_socket):
@@ -66,7 +67,21 @@ def server(host, port):
 
 
 def close_node(signum, stack):
+    asyncio.get_event_loop().stop()
     os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def server_wb(websocket, path):
+    while True:
+        node_info = json.dumps(values)
+        await websocket.send(node_info)
+        await asyncio.sleep(1)
+
+
+def start_server(port):
+    start = websockets.serve(server_wb, "localhost", port + 2)
+    asyncio.get_event_loop().run_until_complete(start)
+    asyncio.get_event_loop().run_forever()
 
 
 if __name__ == "__main__":
@@ -84,5 +99,4 @@ if __name__ == "__main__":
     server_cl.start()
 
     signal.signal(signal.SIGINT, close_node)
-    while True:
-        signal.pause()
+    start_server(PORT)

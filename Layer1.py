@@ -1,3 +1,5 @@
+import asyncio
+import datetime
 import os
 import socket
 from threading import Thread, Lock
@@ -6,10 +8,13 @@ import time
 import json
 import signal
 
+import websockets
+
+import websockets_client as wb
+
 import Operation as Op
 
 values = {}
-update_timer = 10
 mutex = Lock()
 
 layer2_node1 = None
@@ -27,7 +32,7 @@ def update_layer2(signum, stack):
     layer2_node1.send(json.dumps(values).encode())
     layer2_node2.send(json.dumps(values).encode())
     mutex.release()
-    signal.alarm(update_timer)
+    signal.alarm(10)
 
 
 def client_node(host, l2_ports):
@@ -51,8 +56,8 @@ def dedicated_server_core_layer(dscl_socket):
 
         mutex.acquire()
         values = {int(k): int(v) for k, v in json.loads(new_values).items()}
-        mutex.release()
         Op.add_log("Logs/" + name + ".txt", values)
+        mutex.release()
 
 
 def dedicated_server_client(dsc_socket):
@@ -94,7 +99,21 @@ def close_node(signum, stack):
     if layer2_node1 is not None and layer2_node2 is not None:
         layer2_node1.close()
         layer2_node2.close()
+    asyncio.get_event_loop().stop()
     os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def server_wb(websocket, path):
+    while True:
+        node_info = json.dumps(values)
+        await websocket.send(node_info)
+        await asyncio.sleep(1)
+
+
+def start_server(port):
+    start = websockets.serve(server_wb, "localhost", port + 2)
+    asyncio.get_event_loop().run_until_complete(start)
+    asyncio.get_event_loop().run_forever()
 
 
 if __name__ == "__main__":
@@ -122,7 +141,11 @@ if __name__ == "__main__":
     # Aquí configurem l'alarma per actualitzar L2
     if l2_ports != 0:
         signal.signal(signal.SIGALRM, update_layer2)
-        signal.alarm(update_timer)
+        signal.alarm(10)
+
+    now = datetime.datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print("Execució comença: " + current_time)
+
     signal.signal(signal.SIGINT, close_node)
-    while True:
-        signal.pause()
+    start_server(PORT)

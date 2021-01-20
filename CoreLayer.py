@@ -1,4 +1,5 @@
 import socket
+from sched import scheduler
 from threading import Thread, Lock
 import argparse
 import time
@@ -6,13 +7,22 @@ import re
 import json
 import signal
 import os
+
+import asyncio
+
+import websockets
+
 import Operation as Op
+import websockets_client as wb
 
 values = {}
 update_counter = 0
+first_iteration = True
+name = ""
 
 last_op = None
 mutex = Lock()
+blocked = Lock()
 
 dedicated_server = None
 
@@ -23,26 +33,35 @@ close = False
 
 
 def dedicated_server_client(dsc_socket):
-    global update_counter, last_op, values, mutex
+    global update_counter, last_op, values, first_iteration
+    global mutex, blocked, close
     transaction = dsc_socket.recv(1024).decode()
+    if transaction == "":
+        dsc_socket.close()
+        close = True
+        return
+
     operations = Op.parse_transaction(transaction)
     print("NOVA TRANSACCIó DETECTADA!")
 
     for op in operations:
-        print("Un altre client: " + op.to_string())
         if op.type is 'r':
             string = "INDEX -> [" + str(op.index) \
                      + "]; VALUE -> [" + str(values.get(int(op.index), "POSICIÓ BUIDA")) + "]"
             dsc_socket.send(string.encode())
             time.sleep(0.3)
         else:
+            # Bloquejem Lock()
+            if first_iteration is True:
+                first_iteration = False
+                blocked.acquire()
+
+            # Processem a la vegada que enviem l'operació d'escriptura als nodes veïns (active replication)
             values[op.index] = op.value
             last_op = op.to_string()
             # Enviem l'operació als nodes veïns
             mutex.release()
-            time.sleep(0.3)
-            # Esperem que finalitzi la comuncació entre veïns
-            mutex.acquire()
+            blocked.acquire()
 
     dsc_socket.send("ACK".encode())
     dsc_socket.close()
@@ -74,9 +93,7 @@ def dedicated_server_neighbour(dsn_socket):
             close = True
             return
 
-        print("Un altre servidor: " + operation)
-
-        # Actualitzem valors d'aquest node
+        # Actualitzem valors d'aquest node.
         op = re.findall(r'[0-9]+', operation)
         values[int(op[0])] = int(op[1])
 
@@ -108,7 +125,7 @@ def server(host, port):
 
 # Encarregat d'anar fer transaccions sobre el node i enviar als altres CL la instrucció
 def client_node(host, servers_to_connect, l1_port):
-    global server_a, server_b, layer1_node, mutex, last_op
+    global server_a, server_b, layer1_node, mutex, blocked, last_op
 
     # Ens connectem als CoreLayer veïns
     server_a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -122,7 +139,6 @@ def client_node(host, servers_to_connect, l1_port):
         layer1_node.connect((host, l1_port))
 
     print("CONNEXIONS A SERVIDORS ESTABLERTES")
-
     mutex.acquire()
     while True:
         mutex.acquire()
@@ -139,8 +155,34 @@ def client_node(host, servers_to_connect, l1_port):
 
         # Mirem si hem d'actualitzar Layer1
         update_layer1_node()
-        mutex.release()
-        time.sleep(0.3)
+        blocked.release()
+
+
+# Websocket server
+async def server_wb(websocket, path):
+    while True:
+        node_info = json.dumps(values)
+        await websocket.send(node_info)
+        await asyncio.sleep(1)
+
+
+def start_server(port):
+    start = websockets.serve(server_wb, "localhost", port + 3)
+    asyncio.get_event_loop().run_until_complete(start)
+    asyncio.get_event_loop().run_forever()
+
+
+# Utils
+def close_node(signum, stack):
+    global layer1_node, server_a, server_b
+    print("FINALITZANT EXECUCIÓ...")
+    # Tanquem sockets
+    if layer1_node is not None:
+        layer1_node.close()
+    server_a.close()
+    server_b.close()
+    asyncio.get_event_loop().stop()
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def identify_server_port(self_server_port):
@@ -154,17 +196,6 @@ def identify_server_port(self_server_port):
     else:
         name = "A3"
         return [8001, 8002], 9002
-
-
-def close_node(signum, stack):
-    global layer1_node, server_a, server_b
-    print("FINALITZANT EXECUCIÓ...")
-    # Tanquem sockets
-    if layer1_node is not None:
-        layer1_node.close()
-    server_a.close()
-    server_b.close()
-    os.kill(os.getpid(), signal.SIGTERM)
 
 
 if __name__ == "__main__":
@@ -187,5 +218,4 @@ if __name__ == "__main__":
     client_cl.start()
 
     signal.signal(signal.SIGINT, close_node)
-    while True:
-        signal.pause()
+    start_server(PORT)
