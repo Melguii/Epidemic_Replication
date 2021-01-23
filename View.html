@@ -19,7 +19,7 @@
         <h3>Core Layer - C2: </h3>
         <div id="C2">{}</div>
         <script>
-            var wss = [], data = [7];
+            var wss = [];
             const ports = [8004, 8005, 8006, 9003, 9004, 10003, 10004];
             const names = ["A1", "A2", "A3", "B1", "B2", "C1", "C2"];
 
@@ -30,7 +30,6 @@
 
             wss.forEach((ws, i) => {
                 ws.onmessage = function (event) {
-                    //data[i] = JSON.parse(event.data);
                     document.getElementById(names[i]).innerHTML = event.data
                 }
             });

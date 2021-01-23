@@ -10,7 +10,6 @@ import signal
 
 import websockets
 
-import websockets_client as wb
 
 import Operation as Op
 
@@ -26,6 +25,7 @@ client_cl = None
 close = False
 
 
+# Actualitzem nodes layer 2
 def update_layer2(signum, stack):
     global values, layer2_node1, layer2_node2, mutex
     mutex.acquire()
@@ -35,6 +35,7 @@ def update_layer2(signum, stack):
     signal.alarm(10)
 
 
+# Inicialitzem nodes L2
 def client_node(host, l2_ports):
     global layer2_node1, layer2_node2
     if l2_ports != 0:
@@ -46,6 +47,7 @@ def client_node(host, l2_ports):
     print("CONNEXIONS A SERVIDORS ESTABLERTES")
 
 
+# Aquí el Core Layer Node sobreescriu la info del hashmap
 def dedicated_server_core_layer(dscl_socket):
     global values, mutex, close, name
     while True:

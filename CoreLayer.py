@@ -13,7 +13,6 @@ import asyncio
 import websockets
 
 import Operation as Op
-import websockets_client as wb
 
 values = {}
 update_counter = 0
@@ -67,6 +66,7 @@ def dedicated_server_client(dsc_socket):
     dsc_socket.close()
 
 
+# Aquí actualitzem la Layer 1
 def update_layer1_node():
     global update_counter, layer1_node, values, last_op
 
